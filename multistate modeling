@@ -1,0 +1,1402 @@
+# ============================================
+# 基于jiqi.csv重新构建多状态数据（必须在机器学习之后跟上这段代码）
+# ============================================
+cat("\n=== 基于jiqi.csv重新构建多状态数据 ===\n")
+
+# 读取jiqi.csv数据
+library(survival)
+
+jiqi <- read.csv("jiqi.csv")
+cat("jiqi数据维度:", dim(jiqi), "\n")
+cat("jiqi数据列名预览:\n")
+print(head(names(jiqi), 20))
+
+# 指定前10个重要蛋白质（按重要性排序）
+top10_proteins <- c("VSIG2", "GAST", "PLAUR", "SELENOP", "BTN3A2", 
+                    "CSF1", "ADGRD1", "FGL1", "MENT", "LRRN1")
+
+cat("指定分析的10个蛋白质:\n")
+for(i in 1:length(top10_proteins)) {
+  cat(sprintf("%2d. %s\n", i, top10_proteins[i]))
+}
+
+# 检查这些蛋白在jiqi数据中是否存在
+available_proteins <- intersect(top10_proteins, names(jiqi))
+cat("在jiqi数据中可用的蛋白质:", length(available_proteins), "个\n")
+
+if(length(available_proteins) < 10) {
+  cat("注意：只有", length(available_proteins), "个蛋白质可用\n")
+  missing_proteins <- setdiff(top10_proteins, available_proteins)
+  cat("缺失的蛋白质:", paste(missing_proteins, collapse = ", "), "\n")
+}
+
+protein_cols <- available_proteins
+
+# 识别GI疾病相关变量
+gi_status_patterns <- c("colorectal.*status", "liver.*status", "GERD.*status", 
+                        "IBD.*status", "IBS.*status", "ALD.*status", "NAFLD.*status")
+gi_time_patterns <- c("colorectal.*time", "liver.*time", "GERD.*time",
+                      "IBD.*time", "IBS.*time", "ALD.*time", "NAFLD.*time")
+
+gi_status_cols <- c()
+gi_time_cols <- c()
+
+for(pattern in gi_status_patterns) {
+  matches <- grep(pattern, names(jiqi), value = TRUE, ignore.case = TRUE)
+  gi_status_cols <- c(gi_status_cols, matches)
+}
+
+for(pattern in gi_time_patterns) {
+  matches <- grep(pattern, names(jiqi), value = TRUE, ignore.case = TRUE)
+  gi_time_cols <- c(gi_time_cols, matches)
+}
+
+# 识别Neuro疾病相关变量
+neuro_status_patterns <- c("Stroke.*status", "Anxiety.*status", "Bipolar.*status",
+                           "Depression.*status", "ACD.*status", "AD.*status", 
+                           "VAD.*status", "PD.*status", "OACPD.*status")
+neuro_time_patterns <- c("Stroke.*time", "Anxiety.*time", "Bipolar.*time",
+                         "Depression.*time", "ACD.*time", "AD.*time",
+                         "VAD.*time", "PD.*time", "OACPD.*time")
+
+neuro_status_cols <- c()
+neuro_time_cols <- c()
+
+for(pattern in neuro_status_patterns) {
+  matches <- grep(pattern, names(jiqi), value = TRUE, ignore.case = TRUE)
+  neuro_status_cols <- c(neuro_status_cols, matches)
+}
+
+for(pattern in neuro_time_patterns) {
+  matches <- grep(pattern, names(jiqi), value = TRUE, ignore.case = TRUE)
+  neuro_time_cols <- c(neuro_time_cols, matches)
+}
+
+cat("\n疾病变量识别结果:\n")
+cat("GI状态变量:", length(gi_status_cols), "个:", head(gi_status_cols, 5), "\n")
+cat("GI时间变量:", length(gi_time_cols), "个:", head(gi_time_cols, 5), "\n")
+cat("Neuro状态变量:", length(neuro_status_cols), "个:", head(neuro_status_cols, 5), "\n")
+cat("Neuro时间变量:", length(neuro_time_cols), "个:", head(neuro_time_cols, 5), "\n")
+
+# ============================================
+# 步骤2：计算首次疾病发生时间
+# ============================================
+cat("\n=== 计算首次疾病发生时间 ===\n")
+
+# 确保eid列存在
+if(!"eid" %in% names(jiqi)) {
+  jiqi$eid <- 1:nrow(jiqi)
+  cat("创建eid列\n")
+}
+
+# 计算首次GI疾病时间
+cat("计算首次GI疾病时间...\n")
+jiqi$first_gi_time <- sapply(1:nrow(jiqi), function(i) {
+  if(length(gi_status_cols) == 0 || length(gi_time_cols) == 0) return(NA_real_)
+  
+  status_vals <- as.numeric(jiqi[i, gi_status_cols])
+  time_vals <- as.numeric(jiqi[i, gi_time_cols])
+  
+  # 查找有效事件（状态=1且时间>0）
+  valid_events <- !is.na(status_vals) & status_vals == 1 & 
+    !is.na(time_vals) & time_vals > 0
+  
+  if(any(valid_events)) {
+    min(time_vals[valid_events])
+  } else {
+    NA_real_
+  }
+})
+
+# 计算首次Neuro疾病时间
+cat("计算首次Neuro疾病时间...\n")
+jiqi$first_neuro_time <- sapply(1:nrow(jiqi), function(i) {
+  if(length(neuro_status_cols) == 0 || length(neuro_time_cols) == 0) return(NA_real_)
+  
+  status_vals <- as.numeric(jiqi[i, neuro_status_cols])
+  time_vals <- as.numeric(jiqi[i, neuro_time_cols])
+  
+  # 查找有效事件（状态=1且时间>0）
+  valid_events <- !is.na(status_vals) & status_vals == 1 & 
+    !is.na(time_vals) & time_vals > 0
+  
+  if(any(valid_events)) {
+    min(time_vals[valid_events])
+  } else {
+    NA_real_
+  }
+})
+
+# 过滤掉包含负数时间的行
+if(length(gi_time_cols) > 0 && length(neuro_time_cols) > 0) {
+  all_time_cols <- c(gi_time_cols, neuro_time_cols)
+  negative_time_rows <- apply(jiqi[, all_time_cols, drop = FALSE], 1, 
+                              function(row) any(row < 0, na.rm = TRUE))
+  
+  if(sum(negative_time_rows, na.rm = TRUE) > 0) {
+    cat("移除", sum(negative_time_rows, na.rm = TRUE), "行包含负数时间的数据\n")
+    jiqi <- jiqi[!negative_time_rows, ]
+  }
+}
+
+# 基本统计
+gi_patients <- sum(!is.na(jiqi$first_gi_time))
+neuro_patients <- sum(!is.na(jiqi$first_neuro_time))
+
+cat("处理后数据集行数:", nrow(jiqi), "\n")
+cat("GI疾病患者:", gi_patients, "人\n")
+cat("Neuro疾病患者:", neuro_patients, "人\n")
+
+# ============================================
+# 步骤3：确定疾病状态和转移模式
+# ============================================
+cat("\n=== 确定疾病状态和转移模式 ===\n")
+
+# 计算疾病状态
+jiqi$has_gi <- !is.na(jiqi$first_gi_time)
+jiqi$has_neuro <- !is.na(jiqi$first_neuro_time)
+
+# 同时诊断阈值（0.5年）
+concurrent_threshold <- 0.5
+
+jiqi$is_concurrent <- jiqi$has_gi & jiqi$has_neuro & 
+  abs(jiqi$first_gi_time - jiqi$first_neuro_time) < concurrent_threshold
+
+concurrent_count <- sum(jiqi$is_concurrent, na.rm = TRUE)
+concurrent_rate <- concurrent_count / nrow(jiqi)
+
+cat("同时诊断分析:\n")
+cat("同时诊断患者:", concurrent_count, "人\n")
+cat("同时诊断比例:", round(concurrent_rate * 100, 3), "%\n")
+
+# 设置最大随访时间
+max_followup <- 16.65
+
+# 确定最终状态
+jiqi$final_state <- case_when(
+  jiqi$has_gi & jiqi$has_neuro ~ 4,    # 共病
+  jiqi$has_gi & !jiqi$has_neuro ~ 2,   # 仅GI
+  !jiqi$has_gi & jiqi$has_neuro ~ 3,   # 仅Neuro
+  TRUE ~ 1                             # 健康
+)
+
+# 设置删失时间
+jiqi$censor_time <- max_followup
+
+# 确定转移模式
+jiqi$transition_pattern <- case_when(
+  jiqi$final_state == 1 ~ "健康",
+  jiqi$final_state == 2 ~ "健康→仅GI",
+  jiqi$final_state == 3 ~ "健康→仅Neuro",
+  jiqi$final_state == 4 & jiqi$is_concurrent ~ "健康→同时共病",
+  jiqi$final_state == 4 & !is.na(jiqi$first_gi_time) & !is.na(jiqi$first_neuro_time) & 
+    jiqi$first_gi_time <= jiqi$first_neuro_time ~ "健康→GI→Neuro",
+  jiqi$final_state == 4 & !is.na(jiqi$first_gi_time) & !is.na(jiqi$first_neuro_time) & 
+    jiqi$first_neuro_time < jiqi$first_gi_time ~ "健康→Neuro→GI",
+  TRUE ~ "未分类"
+)
+
+cat("\n转移模式分布:\n")
+print(table(jiqi$transition_pattern))
+cat("\n最终状态分布:\n")
+state_table <- table(jiqi$final_state)
+names(state_table) <- c("健康", "仅GI", "仅Neuro", "共病")[as.numeric(names(state_table))]
+print(state_table)
+
+# ============================================
+# 步骤4：创建多状态数据记录
+# ============================================
+cat("\n=== 创建多状态数据记录 ===\n")
+
+# 初始化存储列表
+mstate_records <- list()
+record_count <- 0
+skipped_count <- 0
+
+# 设置参数
+min_interval <- 0.01
+concurrent_threshold <- 0.5
+
+cat("开始创建多状态数据...\n")
+
+# 处理协变量
+jiqi$age_numeric <- as.numeric(jiqi$age)
+if("sex" %in% names(jiqi)) {
+  jiqi$sex_numeric <- ifelse(tolower(jiqi$sex) == "male" | jiqi$sex == 1, 1, 0)
+} else {
+  jiqi$sex_numeric <- 0  # 默认值
+}
+
+# 逐个处理每个个体
+for(i in 1:nrow(jiqi)) {
+  if(i %% 10000 == 0) cat("处理第", i, "个个体\n")
+  
+  # 获取当前个体数据
+  current_id <- jiqi$eid[i]
+  current_age <- jiqi$age_numeric[i]
+  current_sex <- jiqi$sex_numeric[i]
+  current_state <- jiqi$final_state[i]
+  current_gi_time <- jiqi$first_gi_time[i]
+  current_neuro_time <- jiqi$first_neuro_time[i]
+  current_censor_time <- jiqi$censor_time[i]
+  
+  # 数据完整性检查 - 包括检查负数时间
+  if(is.na(current_state) || is.na(current_censor_time) || current_censor_time <= 0 ||
+     is.na(current_age) || is.na(current_sex) ||
+     (!is.na(current_gi_time) && current_gi_time < 0) ||
+     (!is.na(current_neuro_time) && current_neuro_time < 0)) {
+    skipped_count <- skipped_count + 1
+    next
+  }
+  
+  if(current_state == 1) {
+    # 状态1：健康人群，随访至删失时间
+    T_stop_val <- current_censor_time
+    
+    # 为所有潜在的初始转移创建删失记录
+    for (dest_state in c(2, 3, 4)) {
+      record_count <- record_count + 1
+      mstate_records[[record_count]] <- data.frame(
+        eid = current_id, from = 1, to = dest_state, trans = NA,
+        Tstart = 0, Tstop = T_stop_val, status = 0,
+        age = current_age, sex = current_sex
+      )
+    }
+    
+  } else if(current_state == 2) {
+    # 状态2：仅GI疾病
+    gi_time <- current_gi_time
+    
+    # 记录1：健康→GI (事件发生)
+    record_count <- record_count + 1
+    mstate_records[[record_count]] <- data.frame(
+      eid = current_id, from = 1, to = 2, trans = 1,
+      Tstart = 0, Tstop = gi_time, status = 1,
+      age = current_age, sex = current_sex
+    )
+    
+    # 记录2 & 3: 健康→Neuro/共病 (竞争风险，删失于GI发生时)
+    for (dest_state in c(3, 4)) {
+      record_count <- record_count + 1
+      mstate_records[[record_count]] <- data.frame(
+        eid = current_id, from = 1, to = dest_state, trans = NA,
+        Tstart = 0, Tstop = gi_time, status = 0,
+        age = current_age, sex = current_sex
+      )
+    }
+    
+    # 记录4：GI→共病 (删失)
+    record_count <- record_count + 1
+    mstate_records[[record_count]] <- data.frame(
+      eid = current_id, from = 2, to = 4, trans = NA,
+      Tstart = gi_time, Tstop = current_censor_time, status = 0,
+      age = current_age, sex = current_sex
+    )
+    
+  } else if(current_state == 3) {
+    # 状态3：仅Neuro疾病
+    neuro_time <- current_neuro_time
+    
+    # 记录1：健康→Neuro (事件发生)
+    record_count <- record_count + 1
+    mstate_records[[record_count]] <- data.frame(
+      eid = current_id, from = 1, to = 3, trans = 2,
+      Tstart = 0, Tstop = neuro_time, status = 1,
+      age = current_age, sex = current_sex
+    )
+    
+    # 记录2 & 3: 健康→GI/共病 (竞争风险)
+    for (dest_state in c(2, 4)) {
+      record_count <- record_count + 1
+      mstate_records[[record_count]] <- data.frame(
+        eid = current_id, from = 1, to = dest_state, trans = NA,
+        Tstart = 0, Tstop = neuro_time, status = 0,
+        age = current_age, sex = current_sex
+      )
+    }
+    
+    # 记录4：Neuro→共病 (删失)
+    record_count <- record_count + 1
+    mstate_records[[record_count]] <- data.frame(
+      eid = current_id, from = 3, to = 4, trans = NA,
+      Tstart = neuro_time, Tstop = current_censor_time, status = 0,
+      age = current_age, sex = current_sex
+    )
+    
+  } else if(current_state == 4) {
+    # 状态4：共病患者
+    if(!is.na(current_gi_time) && !is.na(current_neuro_time)) {
+      time_difference <- abs(current_gi_time - current_neuro_time)
+      
+      if(time_difference < concurrent_threshold) {
+        # 同时诊断
+        comorbid_time <- min(current_gi_time, current_neuro_time)
+        record_count <- record_count + 1
+        mstate_records[[record_count]] <- data.frame(
+          eid = current_id, from = 1, to = 4, trans = 3,
+          Tstart = 0, Tstop = comorbid_time, status = 1,
+          age = current_age, sex = current_sex
+        )
+        record_count <- record_count + 1
+        mstate_records[[record_count]] <- data.frame(
+          eid = current_id, from = 1, to = 2, trans = NA,
+          Tstart = 0, Tstop = comorbid_time, status = 0,
+          age = current_age, sex = current_sex
+        )
+        record_count <- record_count + 1
+        mstate_records[[record_count]] <- data.frame(
+          eid = current_id, from = 1, to = 3, trans = NA,
+          Tstart = 0, Tstop = comorbid_time, status = 0,
+          age = current_age, sex = current_sex
+        )
+        
+      } else {
+        # 序列诊断
+        if(current_gi_time < current_neuro_time) {
+          # GI先发生
+          gi_time <- current_gi_time
+          neuro_time <- current_neuro_time
+          
+          # 健康→GI（发生）
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 1, to = 2, trans = 1,
+            Tstart = 0, Tstop = gi_time, status = 1,
+            age = current_age, sex = current_sex
+          )
+          # 健康→Neuro/共病（竞争风险）
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 1, to = 3, trans = NA,
+            Tstart = 0, Tstop = gi_time, status = 0,
+            age = current_age, sex = current_sex
+          )
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 1, to = 4, trans = NA,
+            Tstart = 0, Tstop = gi_time, status = 0,
+            age = current_age, sex = current_sex
+          )
+          # GI→共病（发生）
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 2, to = 4, trans = 4,
+            Tstart = gi_time, Tstop = neuro_time, status = 1,
+            age = current_age, sex = current_sex
+          )
+          
+        } else {
+          # Neuro先发生
+          gi_time <- current_gi_time
+          neuro_time <- current_neuro_time
+          
+          # 健康→Neuro（发生）
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 1, to = 3, trans = 2,
+            Tstart = 0, Tstop = neuro_time, status = 1,
+            age = current_age, sex = current_sex
+          )
+          # 健康→GI/共病（竞争风险）
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 1, to = 2, trans = NA,
+            Tstart = 0, Tstop = neuro_time, status = 0,
+            age = current_age, sex = current_sex
+          )
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 1, to = 4, trans = NA,
+            Tstart = 0, Tstop = neuro_time, status = 0,
+            age = current_age, sex = current_sex
+          )
+          # Neuro→共病（发生）
+          record_count <- record_count + 1
+          mstate_records[[record_count]] <- data.frame(
+            eid = current_id, from = 3, to = 4, trans = 5,
+            Tstart = neuro_time, Tstop = gi_time, status = 1,
+            age = current_age, sex = current_sex
+          )
+        }
+      }
+    } else {
+      skipped_count <- skipped_count + 1
+    }
+  }
+}
+
+# 合并所有记录
+cat("\n合并记录...\n")
+mstate_data_jiqi <- do.call(rbind, mstate_records)
+
+# 过滤掉负数时间的记录
+cat("过滤负数时间记录...\n")
+before_filter <- nrow(mstate_data_jiqi)
+mstate_data_jiqi <- mstate_data_jiqi[mstate_data_jiqi$Tstart >= 0 & mstate_data_jiqi$Tstop > 0, ]
+after_filter <- nrow(mstate_data_jiqi)
+if(before_filter > after_filter) {
+  cat("过滤掉", before_filter - after_filter, "条包含负数时间的记录\n")
+}
+
+cat("\n=== 数据验证 ===\n")
+cat("原始个体数:", nrow(jiqi), "\n")
+cat("跳过的个体数:", skipped_count, "\n")
+cat("处理的个体数:", nrow(jiqi) - skipped_count, "\n")
+cat("生成的记录数:", nrow(mstate_data_jiqi), "\n")
+
+# 检查时间区间有效性
+invalid_time_intervals <- sum(mstate_data_jiqi$Tstart >= mstate_data_jiqi$Tstop)
+if(invalid_time_intervals > 0) {
+  cat("\n警告：发现", invalid_time_intervals, "条记录的 Tstart >= Tstop\n")
+} else {
+  cat("\n✓ 所有记录的时间区间均有效\n")
+}
+
+# ============================================
+# 步骤5：添加转移编号并最终验证
+# ============================================
+cat("\n=== 添加转移编号 ===\n")
+
+# 添加转移编号
+mstate_data_with_trans_jiqi <- mstate_data_jiqi %>%
+  mutate(trans = case_when(
+    from == 1 & to == 2 ~ 1,  # 健康→GI
+    from == 1 & to == 3 ~ 2,  # 健康→Neuro  
+    from == 1 & to == 4 ~ 3,  # 健康→共病（直接转移）
+    from == 2 & to == 4 ~ 4,  # GI→共病
+    from == 3 & to == 4 ~ 5   # Neuro→共病
+  )) %>%
+  filter(!is.na(trans))
+
+cat("添加trans列后的数据:\n")
+cat("- 记录数:", nrow(mstate_data_with_trans_jiqi), "\n")
+cat("- 各转移的记录数:\n")
+print(table(mstate_data_with_trans_jiqi$trans))
+
+# 转移名称映射
+transition_names_jiqi <- c(
+  "1" = "健康→GI",
+  "2" = "健康→Neuro", 
+  "3" = "健康→共病",
+  "4" = "GI→共病",
+  "5" = "Neuro→共病"
+)
+
+# 查看实际发生的事件
+event_summary_jiqi <- mstate_data_with_trans_jiqi %>%
+  filter(status == 1) %>%
+  group_by(trans) %>%
+  summarise(
+    n_events = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    transition = transition_names_jiqi[as.character(trans)],
+    percentage = round(n_events / sum(n_events) * 100, 1)
+  )
+
+cat("\n实际发生的事件分布:\n")
+print(event_summary_jiqi)
+
+# 验证数据结构
+cat("\n=== 最终验证 ===\n")
+cat("多状态数据维度:", dim(mstate_data_with_trans_jiqi), "\n")
+cat("包含的变量:", names(mstate_data_with_trans_jiqi), "\n")
+
+# 检查每个个体的记录数
+records_per_individual <- mstate_data_with_trans_jiqi %>%
+  group_by(eid) %>%
+  summarise(n_records = n(), .groups = 'drop')
+
+cat("每个个体的记录数分布:\n")
+print(summary(records_per_individual$n_records))
+
+# 创建转移矩阵用于验证
+tmat_jiqi <- matrix(NA, 4, 4)
+dimnames(tmat_jiqi) <- list(
+  from = c("健康", "GI", "Neuro", "共病"),
+  to = c("健康", "GI", "Neuro", "共病")
+)
+tmat_jiqi[1, 2:4] <- 1:3  # 健康→GI/Neuro/共病
+tmat_jiqi[2, 4] <- 4      # GI→共病
+tmat_jiqi[3, 4] <- 5      # Neuro→共病
+
+cat("\n转移矩阵:\n")
+print(tmat_jiqi)
+
+cat("\n=== jiqi.csv的多状态数据构建完成 ===\n")
+cat("✓ mstate_data_with_trans_jiqi 数据已准备就绪\n")
+cat("✓ 可以继续进行蛋白质分析\n")
+
+# 基本描述性统计
+cat("\n=== 基本描述性统计 ===\n")
+cat("年龄分布:\n")
+print(summary(mstate_data_with_trans_jiqi$age))
+cat("性别分布:\n")
+print(table(mstate_data_with_trans_jiqi$sex))
+cat("转移类型分布:\n")
+print(table(mstate_data_with_trans_jiqi$trans, mstate_data_with_trans_jiqi$status))
+
+# ============================================
+# 基于jiqi.csv的蛋白质多状态分析
+# ============================================
+cat("\n=== 开始蛋白质多状态分析 ===\n")
+
+# 使用指定的10个蛋白质（保持排序）
+selected_proteins <- available_proteins[match(top10_proteins, available_proteins)]
+selected_proteins <- selected_proteins[!is.na(selected_proteins)]
+
+cat("分析的蛋白质:", length(selected_proteins), "个\n")
+for(i in 1:length(selected_proteins)) {
+  cat(sprintf("%2d. %s\n", i, selected_proteins[i]))
+}
+
+# 将蛋白质数据合并到多状态数据中
+cat("\n合并蛋白质数据到多状态数据...\n")
+mstate_protein_data <- mstate_data_with_trans_jiqi %>%
+  left_join(jiqi[, c("eid", selected_proteins)], by = "eid")
+
+cat("合并后数据维度:", dim(mstate_protein_data), "\n")
+
+# 检查缺失值
+cat("\n缺失值检查:\n")
+for(protein in selected_proteins) {
+  missing_count <- sum(is.na(mstate_protein_data[[protein]]))
+  missing_percent <- missing_count/nrow(mstate_protein_data)*100
+  cat(sprintf("  %s: %d个缺失值 (%.1f%%)\n", protein, missing_count, missing_percent))
+}
+
+# 处理缺失值（用中位数填充）
+for(protein in selected_proteins) {
+  if(sum(is.na(mstate_protein_data[[protein]])) > 0) {
+    median_val <- median(mstate_protein_data[[protein]], na.rm = TRUE)
+    mstate_protein_data[[protein]][is.na(mstate_protein_data[[protein]])] <- median_val
+    cat("已填充", protein, "的缺失值\n")
+  }
+}
+
+cat("\n✓ 蛋白质数据准备完成\n")
+
+# ============================================
+# 修正版：单个蛋白的转移特异性多状态分析
+# ============================================
+cat("\n=== 单个蛋白的转移特异性分析 ===\n")
+
+# 1. 首先准备协变量
+cat("准备协变量数据...\n")
+
+# 检查并准备协变量
+available_covariates <- c()
+
+# 检查年龄
+if("age" %in% names(jiqi)) {
+  mstate_protein_data$age_std <- scale(mstate_protein_data$age)[,1]
+  available_covariates <- c(available_covariates, "age_std")
+  cat("✓ 年龄变量已标准化\n")
+}
+
+# 检查性别
+if("sex" %in% names(jiqi)) {
+  # 确保性别为0/1编码
+  if(is.character(mstate_protein_data$sex)) {
+    mstate_protein_data$sex_binary <- ifelse(tolower(mstate_protein_data$sex) == "male", 1, 0)
+  } else {
+    mstate_protein_data$sex_binary <- mstate_protein_data$sex
+  }
+  available_covariates <- c(available_covariates, "sex_binary")
+  cat("✓ 性别变量已准备\n")
+}
+
+# 检查BMI
+if("BMI" %in% names(jiqi)) {
+  jiqi_bmi <- jiqi[, c("eid", "BMI")]
+  mstate_protein_data <- mstate_protein_data %>%
+    left_join(jiqi_bmi, by = "eid")
+  
+  # 处理BMI缺失值
+  if(sum(is.na(mstate_protein_data$BMI)) > 0) {
+    median_bmi <- median(mstate_protein_data$BMI, na.rm = TRUE)
+    mstate_protein_data$BMI[is.na(mstate_protein_data$BMI)] <- median_bmi
+    cat("已填充BMI缺失值\n")
+  }
+  
+  mstate_protein_data$BMI_std <- scale(mstate_protein_data$BMI)[,1]
+  available_covariates <- c(available_covariates, "BMI_std")
+  cat("✓ BMI变量已标准化\n")
+}
+
+# 检查其他可能的协变量
+other_potential_covs <- c("TDI", "Physical_activity", "smoking_status")
+for(cov in other_potential_covs) {
+  if(cov %in% names(jiqi)) {
+    jiqi_cov <- jiqi[, c("eid", cov)]
+    names(jiqi_cov)[2] <- "temp_cov"
+    mstate_protein_data <- mstate_protein_data %>%
+      left_join(jiqi_cov, by = "eid")
+    
+    # 标准化连续变量
+    if(is.numeric(jiqi_cov$temp_cov)) {
+      mstate_protein_data[[paste0(cov, "_std")]] <- scale(mstate_protein_data$temp_cov)[,1]
+      available_covariates <- c(available_covariates, paste0(cov, "_std"))
+    } else {
+      mstate_protein_data[[cov]] <- mstate_protein_data$temp_cov
+      available_covariates <- c(available_covariates, cov)
+    }
+    
+    mstate_protein_data$temp_cov <- NULL
+    cat("✓", cov, "变量已准备\n")
+  }
+}
+
+cat("可用协变量:", paste(available_covariates, collapse = ", "), "\n")
+
+# 2. 定义转移类型和名称
+transition_names <- c(
+  "1" = "健康→GI",
+  "2" = "健康→Neuro", 
+  "3" = "健康→共病",
+  "4" = "GI→共病",
+  "5" = "Neuro→共病"
+)
+
+# 3. 创建详细结果存储表
+detailed_protein_results <- data.frame(
+  Protein = character(),
+  Transition = character(),
+  Transition_ID = numeric(),
+  HR = numeric(),
+  HR_Lower = numeric(),
+  HR_Upper = numeric(),
+  P_value = numeric(),
+  N_events = numeric(),
+  N_total = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# 4. 逐个蛋白质的转移特异性分析
+for(i in 1:length(selected_proteins)) {
+  protein_name <- selected_proteins[i]
+  cat("\n", rep("=", 60), "\n")
+  cat("分析蛋白质", i, ":", protein_name, "\n")
+  cat(rep("=", 60), "\n")
+  
+  # 标准化当前蛋白质
+  protein_values <- mstate_protein_data[[protein_name]]
+  protein_std <- scale(protein_values)[,1]
+  mstate_protein_data[[paste0(protein_name, "_std")]] <- protein_std
+  
+  # 对每个转移路径分别分析
+  for(trans_id in 1:5) {
+    transition_name <- transition_names[as.character(trans_id)]
+    cat(sprintf("\n--- 转移 %d: %s ---\n", trans_id, transition_name))
+    
+    # 筛选特定转移的数据
+    trans_specific_data <- mstate_protein_data %>% 
+      filter(trans == trans_id)
+    
+    # 检查数据量
+    n_total <- nrow(trans_specific_data)
+    n_events <- sum(trans_specific_data$status)
+    
+    cat(sprintf("数据量: %d条记录, %d个事件\n", n_total, n_events))
+    
+    # 如果事件数太少，跳过
+    if(n_events < 5) {
+      cat("事件数不足，跳过此转移\n")
+      next
+    }
+    
+    # 构建协变量公式
+    covariate_formula <- paste(available_covariates, collapse = " + ")
+    if(covariate_formula != "") {
+      formula_text <- paste0("Surv(Tstart, Tstop, status) ~ ", 
+                             protein_name, "_std + ", covariate_formula)
+    } else {
+      formula_text <- paste0("Surv(Tstart, Tstop, status) ~ ", protein_name, "_std")
+    }
+    
+    cat("模型公式:", formula_text, "\n")
+    
+    # 拟合Cox模型
+    tryCatch({
+      cox_model <- coxph(as.formula(formula_text), data = trans_specific_data)
+      model_summary <- summary(cox_model)
+      
+      # 提取蛋白质的结果
+      protein_coef <- paste0(protein_name, "_std")
+      
+      if(protein_coef %in% rownames(model_summary$conf.int)) {
+        hr_value <- model_summary$conf.int[protein_coef, "exp(coef)"]
+        hr_lower <- model_summary$conf.int[protein_coef, "lower .95"]
+        hr_upper <- model_summary$conf.int[protein_coef, "upper .95"]
+        p_value <- model_summary$coefficients[protein_coef, "Pr(>|z|)"]
+        
+        # 存储结果
+        detailed_protein_results <- rbind(detailed_protein_results, data.frame(
+          Protein = protein_name,
+          Transition = transition_name,
+          Transition_ID = trans_id,
+          HR = hr_value,
+          HR_Lower = hr_lower,
+          HR_Upper = hr_upper,
+          P_value = p_value,
+          N_events = n_events,
+          N_total = n_total
+        ))
+        
+        # 显示结果
+        cat(sprintf("HR: %.3f (95%% CI: %.3f - %.3f)\n", hr_value, hr_lower, hr_upper))
+        cat(sprintf("P值: %.4f", p_value))
+        
+        if(p_value < 0.05) {
+          cat(" *** 显著 ***")
+        }
+        cat("\n")
+        
+        # 显示协变量结果摘要
+        if(length(available_covariates) > 0) {
+          cat("协变量结果:\n")
+          for(cov in available_covariates) {
+            if(cov %in% rownames(model_summary$coefficients)) {
+              cov_hr <- model_summary$conf.int[cov, "exp(coef)"]
+              cov_p <- model_summary$coefficients[cov, "Pr(>|z|)"]
+              cat(sprintf("  %s: HR=%.3f, P=%.3f\n", cov, cov_hr, cov_p))
+            }
+          }
+        }
+        
+      } else {
+        cat("未能提取蛋白质系数\n")
+      }
+      
+    }, error = function(e) {
+      cat("模型拟合失败:", e$message, "\n")
+    })
+  }
+  
+  cat("\n", protein_name, "分析完成\n")
+}
+
+# 5. 整体多状态分析（使用strata）
+cat("\n", rep("=", 60), "\n")
+cat("整体多状态分析（所有转移合并）\n")
+cat(rep("=", 60), "\n")
+
+overall_protein_results <- data.frame(
+  Protein = character(),
+  HR = numeric(),
+  HR_Lower = numeric(),
+  HR_Upper = numeric(),
+  P_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(protein_name in selected_proteins) {
+  cat("\n分析", protein_name, "的整体效应...\n")
+  
+  # 构建协变量公式
+  covariate_formula <- paste(available_covariates, collapse = " + ")
+  if(covariate_formula != "") {
+    formula_text <- paste0("Surv(Tstart, Tstop, status) ~ ", 
+                           protein_name, "_std + ", covariate_formula, " + strata(trans)")
+  } else {
+    formula_text <- paste0("Surv(Tstart, Tstop, status) ~ ", protein_name, "_std + strata(trans)")
+  }
+  
+  tryCatch({
+    overall_cox <- coxph(as.formula(formula_text), data = mstate_protein_data)
+    overall_summary <- summary(overall_cox)
+    
+    protein_coef <- paste0(protein_name, "_std")
+    
+    if(protein_coef %in% rownames(overall_summary$conf.int)) {
+      hr_value <- overall_summary$conf.int[protein_coef, "exp(coef)"]
+      hr_lower <- overall_summary$conf.int[protein_coef, "lower .95"]
+      hr_upper <- overall_summary$conf.int[protein_coef, "upper .95"]
+      p_value <- overall_summary$coefficients[protein_coef, "Pr(>|z|)"]
+      
+      overall_protein_results <- rbind(overall_protein_results, data.frame(
+        Protein = protein_name,
+        HR = hr_value,
+        HR_Lower = hr_lower,
+        HR_Upper = hr_upper,
+        P_value = p_value
+      ))
+      
+      cat(sprintf("整体HR: %.3f (95%% CI: %.3f - %.3f), P = %.4f\n", 
+                  hr_value, hr_lower, hr_upper, p_value))
+    }
+    
+  }, error = function(e) {
+    cat("整体模型失败:", e$message, "\n")
+  })
+}
+
+# ============================================
+# 结果展示和比较分析
+# ============================================
+cat("\n=== 结果展示和比较 ===\n")
+
+# 1. 转移特异性结果汇总
+cat("1. 转移特异性结果汇总:\n")
+print(detailed_protein_results)
+
+# 2. 找出每个转移路径的显著蛋白质
+cat("\n2. 各转移路径的显著蛋白质 (P < 0.05):\n")
+significant_by_transition <- detailed_protein_results %>%
+  filter(P_value < 0.05) %>%
+  arrange(Transition_ID, P_value)
+
+if(nrow(significant_by_transition) > 0) {
+  for(trans_id in 1:5) {
+    trans_sig <- significant_by_transition %>% filter(Transition_ID == trans_id)
+    if(nrow(trans_sig) > 0) {
+      cat(sprintf("\n%s (%d个显著蛋白质):\n", 
+                  transition_names[as.character(trans_id)], nrow(trans_sig)))
+      for(j in 1:nrow(trans_sig)) {
+        cat(sprintf("  - %s: HR=%.3f (%.3f-%.3f), P=%.4f\n",
+                    trans_sig$Protein[j], trans_sig$HR[j], 
+                    trans_sig$HR_Lower[j], trans_sig$HR_Upper[j], trans_sig$P_value[j]))
+      }
+    }
+  }
+} else {
+  cat("无显著相关的蛋白质\n")
+}
+
+# 3. 整体效应结果
+cat("\n3. 整体多状态效应:\n")
+print(overall_protein_results)
+
+# 4. 效应大小比较
+cat("\n4. 各转移路径的效应强度比较:\n")
+if(nrow(detailed_protein_results) > 0) {
+  # 计算每个蛋白质在不同转移路径的效应
+  effect_comparison <- detailed_protein_results %>%
+    select(Protein, Transition, HR, P_value) %>%
+    pivot_wider(names_from = Transition, values_from = c(HR, P_value), names_sep = "_")
+  
+  cat("蛋白质在不同转移路径的HR比较:\n")
+  print(effect_comparison)
+}
+
+# 5. 保存详细结果
+write.csv(detailed_protein_results, "detailed_protein_transition_results.csv", row.names = FALSE)
+write.csv(overall_protein_results, "overall_protein_results.csv", row.names = FALSE)
+write.csv(significant_by_transition, "significant_proteins_by_transition.csv", row.names = FALSE)
+
+cat("\n=== 协变量信息 ===\n")
+cat("本分析包含的协变量:\n")
+for(cov in available_covariates) {
+  cat("-", cov, "\n")
+}
+
+cat("\n=== 结果文件已保存 ===\n")
+cat("1. detailed_protein_transition_results.csv - 转移特异性详细结果\n")
+cat("2. overall_protein_results.csv - 整体多状态结果\n") 
+cat("3. significant_proteins_by_transition.csv - 显著蛋白质汇总\n")
+
+cat("\n✓ 修正版单蛋白多状态分析完成！\n")
+
+# ============================================
+# 构建文献式蛋白评分
+# ============================================
+cat("\n=== 构建文献式蛋白评分 ===\n")
+
+# 1. 为jiqi数据中的每个个体计算蛋白评分
+cat("为每个个体计算蛋白Z-score...\n")
+
+# 创建评分数据框
+protein_scores <- data.frame(eid = jiqi$eid)
+
+# 计算每个蛋白质的Z-score
+for(protein in selected_proteins) {
+  cat("处理蛋白质:", protein, "\n")
+  
+  # 获取蛋白质值
+  protein_values <- jiqi[[protein]]
+  
+  # 计算Z-score
+  protein_mean <- mean(protein_values, na.rm = TRUE)
+  protein_sd <- sd(protein_values, na.rm = TRUE)
+  z_scores <- (protein_values - protein_mean) / protein_sd
+  
+  # 存储Z-score
+  protein_scores[[paste0(protein, "_z")]] <- z_scores
+}
+
+# 2. 构建等权重综合评分（文献方法）
+cat("\n构建等权重综合评分（文献方法）...\n")
+
+# 获取所有Z-score列
+z_score_columns <- paste0(selected_proteins, "_z")
+
+# 计算等权重平均分
+protein_scores$Literature_Score <- rowMeans(protein_scores[, z_score_columns], na.rm = TRUE)
+
+# 显示评分分布
+cat("文献式评分分布:\n")
+cat("  最小值:", round(min(protein_scores$Literature_Score, na.rm = TRUE), 3), "\n")
+cat("  最大值:", round(max(protein_scores$Literature_Score, na.rm = TRUE), 3), "\n")
+cat("  平均值:", round(mean(protein_scores$Literature_Score, na.rm = TRUE), 3), "\n")
+cat("  中位数:", round(median(protein_scores$Literature_Score, na.rm = TRUE), 3), "\n")
+cat("  标准差:", round(sd(protein_scores$Literature_Score, na.rm = TRUE), 3), "\n")
+
+# 3. 将评分合并到多状态数据
+cat("\n将评分合并到多状态数据...\n")
+mstate_score_data <- mstate_protein_data %>%
+  left_join(protein_scores[, c("eid", "Literature_Score")], by = "eid")
+
+cat("合并完成，数据维度:", dim(mstate_score_data), "\n")
+cat("评分缺失值:", sum(is.na(mstate_score_data$Literature_Score)), "\n")
+
+cat("\n✓ 文献式蛋白评分构建完成\n")
+
+# ============================================
+# 可视化方案1：顶刊风格多面板森林图
+# ============================================
+cat("\n=== 生成顶刊风格森林图 ===\n")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggpubr)
+library(RColorBrewer)
+library(scales)
+
+# 1. 数据准备和清理
+forest_data <- detailed_protein_results %>%
+  filter(!is.na(HR) & !is.na(P_value)) %>%
+  mutate(
+    # 显著性标记
+    Significance = case_when(
+      P_value < 0.001 ~ "***",
+      P_value < 0.01 ~ "**", 
+      P_value < 0.05 ~ "*",
+      TRUE ~ ""
+    ),
+    # Log HR for better visualization
+    log_HR = log(HR),
+    log_HR_Lower = log(HR_Lower),
+    log_HR_Upper = log(HR_Upper),
+    # 效应方向
+    Effect_Direction = ifelse(HR > 1, "Risk↑", "Risk↓"),
+    # 转移路径简化名称
+    Transition_Short = case_when(
+      Transition_ID == 1 ~ "H→GI",
+      Transition_ID == 2 ~ "H→Neuro", 
+      Transition_ID == 3 ~ "H→Comorbid",
+      Transition_ID == 4 ~ "GI→Comorbid",
+      Transition_ID == 5 ~ "Neuro→Comorbid"
+    ),
+    # 蛋白质排序（按原定顺序）
+    Protein_Order = match(Protein, selected_proteins)
+  ) %>%
+  filter(!is.na(Protein_Order))
+
+# 2. 主森林图：按转移路径分面
+p_forest_main <- ggplot(forest_data, aes(x = HR, y = reorder(Protein, -Protein_Order))) +
+  
+  # 添加垂直参考线
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50", size = 0.8) +
+  
+  # 置信区间
+  geom_errorbarh(aes(xmin = HR_Lower, xmax = HR_Upper, color = Effect_Direction), 
+                 height = 0.3, size = 1, alpha = 0.8) +
+  
+  # HR点
+  geom_point(aes(fill = Effect_Direction, size = -log10(P_value)), 
+             shape = 21, color = "white", stroke = 0.5) +
+  
+  # 显著性标记
+  geom_text(aes(label = Significance, x = HR_Upper * 1.1), 
+            size = 4, fontface = "bold", color = "red", hjust = 0) +
+  
+  # 分面：按转移路径
+  facet_wrap(~ Transition_Short, scales = "free_x", ncol = 3,
+             labeller = labeller(Transition_Short = c(
+               "H→GI" = "Healthy → GI",
+               "H→Neuro" = "Healthy → Neurological", 
+               "H→Comorbid" = "Healthy → Comorbidity",
+               "GI→Comorbid" = "GI → Comorbidity",
+               "Neuro→Comorbid" = "Neuro → Comorbidity"
+             ))) +
+  
+  # 颜色和大小设置
+  scale_color_manual(values = c("Risk↑" = "#E74C3C", "Risk↓" = "#3498DB"),
+                     name = "Effect") +
+  scale_fill_manual(values = c("Risk↑" = "#E74C3C", "Risk↓" = "#3498DB"),
+                    name = "Effect") +
+  scale_size_continuous(range = c(2, 6), name = "-log10(P)", 
+                        guide = guide_legend(override.aes = list(color = "black"))) +
+  
+  # X轴设置
+  scale_x_log10(breaks = c(0.5, 0.7, 1, 1.4, 2, 3), 
+                labels = c("0.5", "0.7", "1.0", "1.4", "2.0", "3.0")) +
+  
+  # 标签
+  labs(
+    title = "Protein Biomarkers and Multi-State Disease Transitions",
+    subtitle = "Hazard Ratios (95% CI) for Each Transition Pathway",
+    x = "Hazard Ratio (95% Confidence Interval)",
+    y = "Protein Biomarkers",
+    caption = "Adjusted for age, sex, BMI and other covariates\n* P<0.05, ** P<0.01, *** P<0.001"
+  ) +
+  
+  # 主题设置
+  theme_pubr() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray30"),
+    strip.text = element_text(size = 11, face = "bold"),
+    strip.background = element_rect(fill = "gray95", color = "black"),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 9),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    panel.grid.major.x = element_line(color = "gray90", size = 0.3),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(t = 20, r = 30, b = 20, l = 20)
+  )
+
+print(p_forest_main)
+ggsave("forest_plot_multistate_transitions.pdf", p_forest_main, 
+       width = 16, height = 10, dpi = 300)
+
+# ============================================
+# 可视化方案2：效应强度热图
+# ============================================
+cat("\n=== 生成效应强度热图 ===\n")
+
+# 准备热图数据
+heatmap_long <- forest_data %>%
+  select(Protein, Transition_Short, HR, P_value, Protein_Order) %>%
+  mutate(
+    # 显著性分类
+    Significance_Level = case_when(
+      P_value < 0.001 ~ "P < 0.001",
+      P_value < 0.01 ~ "P < 0.01",
+      P_value < 0.05 ~ "P < 0.05", 
+      TRUE ~ "P ≥ 0.05"
+    ),
+    # HR分类
+    HR_Category = case_when(
+      HR < 0.8 ~ "Strong Protective",
+      HR < 0.9 ~ "Moderate Protective", 
+      HR < 1.1 ~ "No Effect",
+      HR < 1.3 ~ "Moderate Risk",
+      TRUE ~ "Strong Risk"
+    ),
+    # Log2 HR for color scale
+    log2_HR = log2(HR)
+  )
+
+p_heatmap <- ggplot(heatmap_long, aes(x = Transition_Short, y = reorder(Protein, -Protein_Order))) +
+  
+  # 主要热图瓦片
+  geom_tile(aes(fill = log2_HR), color = "white", size = 0.5) +
+  
+  # 显著性标记
+  geom_point(data = filter(heatmap_long, P_value < 0.05),
+             aes(size = -log10(P_value)), shape = 8, color = "white", stroke = 1) +
+  
+  # 颜色设置
+  scale_fill_gradient2(
+    low = "#3498DB", mid = "white", high = "#E74C3C",
+    midpoint = 0, name = "log₂(HR)",
+    breaks = c(-0.5, -0.25, 0, 0.25, 0.5),
+    labels = c("0.7", "0.84", "1.0", "1.19", "1.41")
+  ) +
+  
+  # 大小设置
+  scale_size_continuous(range = c(1, 4), name = "-log₁₀(P)",
+                        guide = guide_legend(override.aes = list(color = "black"))) +
+  
+  # 坐标轴
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  
+  # 标签
+  labs(
+    title = "Protein Effects Across Disease Transition Pathways",
+    subtitle = "Heat map of Hazard Ratios (stars indicate P < 0.05)",
+    x = "Disease Transition Pathways",
+    y = "Protein Biomarkers",
+    caption = "Blue: protective effect, Red: risk effect, White: no effect"
+  ) +
+  
+  # 主题
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray30"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "right",
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  
+  coord_fixed(ratio = 0.8)
+
+print(p_heatmap)
+ggsave("heatmap_protein_transitions.pdf", p_heatmap, 
+       width = 12, height = 8, dpi = 300)
+
+# ============================================
+# 可视化方案3：简化版关联矩阵图（替代网络图）
+# ============================================
+cat("\n=== 生成关联矩阵图（替代网络图） ===\n")
+
+# 创建关联强度矩阵
+association_matrix <- forest_data %>%
+  filter(!is.na(Protein) & !is.na(Transition_Short)) %>%
+  mutate(
+    # 关联强度：结合HR和显著性
+    Association_Strength = case_when(
+      P_value >= 0.05 ~ 0,  # 不显著
+      P_value < 0.001 ~ abs(log(HR)) * 3,  # 高度显著
+      P_value < 0.01 ~ abs(log(HR)) * 2,   # 中度显著  
+      P_value < 0.05 ~ abs(log(HR)) * 1    # 显著
+    ),
+    # 效应方向
+    Effect_Type = case_when(
+      P_value >= 0.05 ~ "Non-significant",
+      HR > 1 ~ "Risk",
+      HR < 1 ~ "Protective"
+    )
+  )
+
+p_association_matrix <- ggplot(association_matrix, 
+                               aes(x = Transition_Short, y = reorder(Protein, -Protein_Order))) +
+  
+  # 主要矩阵瓦片
+  geom_tile(aes(fill = Association_Strength), color = "white", size = 0.5) +
+  
+  # 显著性标记
+  geom_point(data = filter(association_matrix, P_value < 0.05),
+             aes(color = Effect_Type, size = -log10(P_value)), alpha = 0.8) +
+  
+  # 颜色设置
+  scale_fill_gradient(low = "white", high = "#2C3E50", name = "Association\nStrength") +
+  scale_color_manual(values = c("Risk" = "#E74C3C", "Protective" = "#3498DB"),
+                     name = "Effect Type") +
+  scale_size_continuous(range = c(1, 4), name = "-log₁₀(P)") +
+  
+  # 标签
+  labs(
+    title = "Protein-Transition Association Matrix",
+    subtitle = "Colored tiles show association strength; Points show significant effects",
+    x = "Disease Transition Pathways",
+    y = "Protein Biomarkers (ordered by importance)",
+    caption = "Red points: risk effects; Blue points: protective effects"
+  ) +
+  
+  # 主题
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray30"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+print(p_association_matrix)
+ggsave("association_matrix_protein_transitions.pdf", p_association_matrix, 
+       width = 12, height = 8, dpi = 300)
+
+cat("关联矩阵图生成成功\n")
+
+# ============================================
+# 可视化方案4：综合面板图
+# ============================================
+cat("\n=== 生成综合面板图 ===\n")
+
+# A. 显著蛋白质条形图
+significant_summary <- forest_data %>%
+  filter(P_value < 0.05) %>%
+  group_by(Protein, Protein_Order) %>%
+  summarise(
+    n_significant = n(),
+    min_p = min(P_value),
+    max_hr = max(abs(log(HR))),
+    .groups = 'drop'
+  ) %>%
+  arrange(Protein_Order)
+
+p_sig_summary <- ggplot(significant_summary, aes(x = reorder(Protein, -Protein_Order), y = n_significant)) +
+  geom_col(aes(fill = max_hr), color = "black", size = 0.3) +
+  geom_text(aes(label = n_significant), hjust = -0.1, fontface = "bold") +
+  scale_fill_gradient(low = "#E8F5E8", high = "#27AE60", name = "Max |log(HR)|") +
+  coord_flip() +
+  labs(
+    title = "A. Significant Associations by Protein",
+    subtitle = "Number of significant transition pathways per protein",
+    x = "Protein Biomarkers",
+    y = "Number of Significant Transitions"
+  ) +
+  theme_pubr() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11, face = "bold")
+  )
+
+# B. 转移路径效应分布
+transition_summary <- forest_data %>%
+  group_by(Transition_Short) %>%
+  summarise(
+    mean_hr = mean(HR, na.rm = TRUE),
+    n_significant = sum(P_value < 0.05, na.rm = TRUE),
+    n_risk = sum(HR > 1 & P_value < 0.05, na.rm = TRUE),
+    n_protective = sum(HR < 1 & P_value < 0.05, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+p_trans_summary <- ggplot(transition_summary, aes(x = reorder(Transition_Short, n_significant))) +
+  geom_col(aes(y = n_risk), fill = "#E74C3C", alpha = 0.7, width = 0.6) +
+  geom_col(aes(y = -n_protective), fill = "#3498DB", alpha = 0.7, width = 0.6) +
+  geom_hline(yintercept = 0, color = "black", size = 0.5) +
+  coord_flip() +
+  labs(
+    title = "B. Effects by Transition Pathway",
+    subtitle = "Red: risk effects, Blue: protective effects",
+    x = "Transition Pathways",
+    y = "Number of Significant Proteins"
+  ) +
+  theme_pubr() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11, face = "bold")
+  )
+
+# C. 效应大小分布
+p_effect_dist <- ggplot(forest_data, aes(x = log2(HR), fill = Transition_Short)) +
+  geom_density(alpha = 0.6) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  scale_fill_brewer(type = "qual", palette = "Set2", name = "Transition") +
+  labs(
+    title = "C. Effect Size Distribution",
+    subtitle = "Density of log₂(HR) across all protein-transition pairs",
+    x = "log₂(Hazard Ratio)",
+    y = "Density"
+  ) +
+  theme_pubr() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11, face = "bold"),
+    legend.position = "bottom"
+  )
+
+# 组合面板
+combined_panel <- ggarrange(
+  p_sig_summary, p_trans_summary, p_effect_dist,
+  ncol = 3, nrow = 1,
+  common.legend = FALSE,
+  align = "hv"
+)
+
+# 添加总标题
+final_panel <- annotate_figure(
+  combined_panel,
+  top = text_grob("Multi-State Disease Transition: Protein Biomarker Analysis Summary", 
+                  color = "black", face = "bold", size = 16),
+  bottom = text_grob("Adjusted for age, sex, BMI and other covariates", 
+                     color = "gray50", hjust = 1, x = 1, size = 10)
+)
+
+print(final_panel)
+ggsave("comprehensive_panel_multistate.pdf", final_panel, 
+       width = 18, height = 6, dpi = 300)
+
+# ============================================
+# 可视化方案5：显著蛋白质表达分布
+# ============================================
+cat("\n=== 生成蛋白质表达分布图 ===\n")
+
+# 选择最显著的蛋白质
+top_significant_proteins <- if(nrow(significant_summary) > 0) {
+  significant_summary$Protein[1:min(6, nrow(significant_summary))]
+} else {
+  selected_proteins[1:min(6, length(selected_proteins))]
+}
+
+if(length(top_significant_proteins) > 0) {
+  # 准备表达数据
+  expression_data <- jiqi %>%
+    select(eid, all_of(top_significant_proteins), final_state) %>%
+    pivot_longer(cols = all_of(top_significant_proteins), 
+                 names_to = "Protein", values_to = "Expression") %>%
+    mutate(
+      State_Label = case_when(
+        final_state == 1 ~ "Healthy",
+        final_state == 2 ~ "GI Only",
+        final_state == 3 ~ "Neuro Only", 
+        final_state == 4 ~ "Comorbidity"
+      ),
+      State_Label = factor(State_Label, 
+                           levels = c("Healthy", "GI Only", "Neuro Only", "Comorbidity"))
+    ) %>%
+    filter(!is.na(Expression) & !is.na(State_Label))
+  
+  # 小提琴图 + 箱线图
+  p_expression <- ggplot(expression_data, aes(x = State_Label, y = Expression, fill = State_Label)) +
+    
+    # 小提琴图
+    geom_violin(alpha = 0.7, trim = FALSE) +
+    
+    # 箱线图
+    geom_boxplot(width = 0.2, alpha = 0.8, outlier.size = 0.5) +
+    
+    # 统计比较
+    stat_compare_means(method = "kruskal.test", label.y.npc = 0.95, size = 3) +
+    stat_compare_means(comparisons = list(c("Healthy", "GI Only"), 
+                                          c("Healthy", "Neuro Only"),
+                                          c("Healthy", "Comorbidity")),
+                       method = "wilcox.test", label = "p.signif", size = 3) +
+    
+    # 分面
+    facet_wrap(~ Protein, scales = "free_y", ncol = 3) +
+    
+    # 颜色
+    scale_fill_manual(values = c("Healthy" = "#2ECC71", "GI Only" = "#3498DB", 
+                                 "Neuro Only" = "#9B59B6", "Comorbidity" = "#E74C3C")) +
+    
+    # 标签
+    labs(
+      title = "Protein Expression Across Disease States",
+      subtitle = "Distribution of significant biomarkers by final disease status",
+      x = "Disease State",
+      y = "Protein Expression Level",
+      fill = "Disease State"
+    ) +
+    
+    # 主题
+    theme_pubr() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray30"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+  
+  print(p_expression)
+  ggsave("protein_expression_by_state.pdf", p_expression, 
+         width = 15, height = 10, dpi = 300)
+}
+
+cat("\n=== 所有可视化完成 ===\n")
+cat("生成的图表文件:\n")
+cat("1. forest_plot_multistate_transitions.pdf - 主要森林图\n")
+cat("2. heatmap_protein_transitions.pdf - 效应强度热图\n") 
+cat("3. association_matrix_protein_transitions.pdf - 关联矩阵图\n")
+cat("4. comprehensive_panel_multistate.pdf - 综合面板图\n")
+cat("5. protein_expression_by_state.pdf - 蛋白表达分布图\n")
+
+cat("\n✓ 顶刊级可视化方案完成！\n")
