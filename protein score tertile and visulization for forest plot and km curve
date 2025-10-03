@@ -1,0 +1,420 @@
+# ============================================
+# 最终改进版：分面三分位蛋白评分KM曲线分析
+# ============================================
+cat("\n=== 最终改进版：分面三分位蛋白评分KM曲线分析 ===\n")
+
+library(survival)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(scales)
+
+# 1. 准备三分位蛋白评分分组数据
+cat("准备三分位蛋白评分分组数据...\n")
+
+# 计算三分位点
+score_tertiles <- quantile(mstate_score_data$Literature_Score, 
+                           probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+
+cat("蛋白评分三分位点:\n")
+print(score_tertiles)
+
+# 将评分分为三组
+mstate_score_data$Score_Group_3 <- cut(mstate_score_data$Literature_Score, 
+                                       breaks = score_tertiles, 
+                                       labels = c("Low Score", "Medium Score", "High Score"),
+                                       include.lowest = TRUE)
+
+cat("三分位评分分组分布:\n")
+print(table(mstate_score_data$Score_Group_3, useNA = "ifany"))
+
+# 2. 定义转移路径
+transition_names <- c(
+  "1" = "Baseline to Gut",
+  "2" = "Baseline to Brain", 
+  "3" = "Baseline to Comorbidity",
+  "4" = "Gut to Comorbidity",
+  "5" = "Brain to Comorbidity"
+)
+
+# 3. 为所有转移创建合并的数据集
+cat("\n创建合并的数据集...\n")
+
+all_transitions_data <- data.frame()
+cox_results_3group <- data.frame(
+  Transition = character(),
+  Transition_ID = numeric(),
+  HR_Medium = numeric(),
+  HR_Medium_Lower = numeric(),
+  HR_Medium_Upper = numeric(),
+  P_Medium = numeric(),
+  HR_High = numeric(),
+  HR_High_Lower = numeric(),
+  HR_High_Upper = numeric(),
+  P_High = numeric(),
+  Overall_P = numeric(),
+  Log_Rank_P = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# 4. 逐个处理每个转移，收集数据和统计结果
+for(trans_id in 1:5) {
+  transition_name <- transition_names[as.character(trans_id)]
+  cat(sprintf("\n=== 处理转移%d: %s ===\n", trans_id, transition_name))
+  
+  # 筛选特定转移的数据
+  trans_data <- mstate_score_data %>% 
+    filter(trans == trans_id) %>%
+    filter(!is.na(Score_Group_3))
+  
+  if(nrow(trans_data) < 50) {
+    cat("数据量不足，跳过此转移\n")
+    next
+  }
+  
+  cat(sprintf("数据量: %d条记录, 事件数: %d\n", nrow(trans_data), sum(trans_data$status)))
+  
+  # Cox回归分析
+  hr_medium <- hr_medium_lower <- hr_medium_upper <- p_medium <- NA
+  hr_high <- hr_high_lower <- hr_high_upper <- p_high <- NA
+  overall_p <- NA
+  logrank_p <- NA
+  
+  tryCatch({
+    # 设置Low Score为参考组
+    trans_data$Score_Group_3 <- relevel(trans_data$Score_Group_3, ref = "Low Score")
+    
+    # 拟合Cox模型
+    cox_formula <- Surv(Tstart, Tstop, status) ~ Score_Group_3
+    if("age_std" %in% names(trans_data) && "sex_binary" %in% names(trans_data)) {
+      cox_formula <- Surv(Tstart, Tstop, status) ~ Score_Group_3 + age_std + sex_binary
+    }
+    
+    cox_model <- coxph(cox_formula, data = trans_data)
+    cox_summary <- summary(cox_model)
+    
+    # 提取Cox回归结果
+    if("Score_Group_3Medium Score" %in% rownames(cox_summary$conf.int)) {
+      hr_medium <- cox_summary$conf.int["Score_Group_3Medium Score", "exp(coef)"]
+      hr_medium_lower <- cox_summary$conf.int["Score_Group_3Medium Score", "lower .95"]
+      hr_medium_upper <- cox_summary$conf.int["Score_Group_3Medium Score", "upper .95"]
+      p_medium <- cox_summary$coefficients["Score_Group_3Medium Score", "Pr(>|z|)"]
+    }
+    
+    if("Score_Group_3High Score" %in% rownames(cox_summary$conf.int)) {
+      hr_high <- cox_summary$conf.int["Score_Group_3High Score", "exp(coef)"]
+      hr_high_lower <- cox_summary$conf.int["Score_Group_3High Score", "lower .95"]
+      hr_high_upper <- cox_summary$conf.int["Score_Group_3High Score", "upper .95"]
+      p_high <- cox_summary$coefficients["Score_Group_3High Score", "Pr(>|z|)"]
+    }
+    
+    # 整体P值
+    if(length(cox_summary$waldtest) > 0) {
+      overall_p <- cox_summary$waldtest["pvalue"]
+    }
+    
+    cat(sprintf("Cox回归结果:\n"))
+    cat(sprintf("  Medium vs Low: HR=%.3f (%.3f-%.3f), P=%.4f\n", 
+                hr_medium, hr_medium_lower, hr_medium_upper, p_medium))
+    cat(sprintf("  High vs Low: HR=%.3f (%.3f-%.3f), P=%.4f\n", 
+                hr_high, hr_high_lower, hr_high_upper, p_high))
+    
+  }, error = function(e) {
+    cat("Cox回归失败:", e$message, "\n")
+  })
+  
+  # 计算Log-rank检验（转换为标准格式）
+  tryCatch({
+    simple_data <- trans_data %>%
+      mutate(
+        time = Tstop - Tstart,
+        event = status
+      ) %>%
+      filter(time > 0)
+    
+    if(nrow(simple_data) >= 20) {
+      logrank_test <- survdiff(Surv(time, event) ~ Score_Group_3, data = simple_data)
+      logrank_p <- 1 - pchisq(logrank_test$chisq, length(logrank_test$n) - 1)
+      cat(sprintf("  Log-rank P=%.4f\n", logrank_p))
+    }
+    
+  }, error = function(e) {
+    cat("Log-rank检验失败:", e$message, "\n")
+  })
+  
+  # 保存Cox回归结果
+  cox_results_3group <- rbind(cox_results_3group, data.frame(
+    Transition = transition_name,
+    Transition_ID = trans_id,
+    HR_Medium = hr_medium,
+    HR_Medium_Lower = hr_medium_lower,
+    HR_Medium_Upper = hr_medium_upper,
+    P_Medium = p_medium,
+    HR_High = hr_high,
+    HR_High_Lower = hr_high_lower,
+    HR_High_Upper = hr_high_upper,
+    P_High = p_high,
+    Overall_P = overall_p,
+    Log_Rank_P = logrank_p
+  ))
+  
+  # 计算生存曲线数据（使用标准KM方法）
+  tryCatch({
+    # 转换为标准生存数据
+    simple_data <- trans_data %>%
+      mutate(
+        time = Tstop - Tstart,
+        event = status,
+        transition = transition_name
+      ) %>%
+      filter(time > 0) %>%
+      select(Score_Group_3, time, event, transition)
+    
+    if(nrow(simple_data) >= 20) {
+      # 拟合KM模型
+      km_fit <- survfit(Surv(time, event) ~ Score_Group_3, data = simple_data)
+      
+      # 提取KM数据
+      km_data <- data.frame(
+        time = km_fit$time,
+        survival = km_fit$surv,
+        cumulative_incidence = 1 - km_fit$surv,
+        group = rep(names(km_fit$strata), km_fit$strata),
+        n.risk = km_fit$n.risk,
+        n.event = km_fit$n.event,
+        transition = transition_name,
+        transition_id = trans_id
+      )
+      
+      # 清理组名
+      km_data$group <- gsub("Score_Group_3=", "", km_data$group)
+      
+      all_transitions_data <- rbind(all_transitions_data, km_data)
+      
+      cat(sprintf("✓ %s 数据已收集\n", transition_name))
+    }
+    
+  }, error = function(e) {
+    cat("生存数据计算失败:", e$message, "\n")
+  })
+}
+
+# 5. 生成最终版分面累积发生率图
+if(nrow(all_transitions_data) > 0) {
+  cat("\n生成最终版分面累积发生率图...\n")
+  
+  # 设置转移顺序
+  all_transitions_data$transition <- factor(all_transitions_data$transition, 
+                                            levels = transition_names)
+  
+  # 设置组别顺序
+  all_transitions_data$group <- factor(all_transitions_data$group,
+                                       levels = c("Low Score", "Medium Score", "High Score"))
+  
+  # 准备统计标签（Cox回归整体P值）
+  stat_labels_cox <- cox_results_3group %>%
+    mutate(
+      stat_label = ifelse(!is.na(Overall_P), 
+                          paste0("P = ", format.pval(Overall_P, digits = 3)),
+                          ""),
+      transition = factor(Transition, levels = transition_names)
+    ) %>%
+    select(transition, stat_label)
+  
+  # 累积发生率分面图（无网格线，大p值标签）
+  p_cumulative_final <- ggplot(all_transitions_data, aes(x = time, y = cumulative_incidence, color = group)) +
+    geom_step(size = 1.0) +
+    geom_point(data = all_transitions_data[all_transitions_data$n.event > 0, ], 
+               size = 1.2, alpha = 0.7) +
+    scale_color_manual(values = c("Low Score" = "#2E7D32", 
+                                  "Medium Score" = "#FF9800", 
+                                  "High Score" = "#D32F2F"),
+                       name = "Protein Score") +
+    scale_y_continuous(labels = percent_format(accuracy = 1)) +
+    facet_wrap(~ transition, ncol = 5, scales = "free") +
+    # 添加大的统计标签
+    geom_text(data = stat_labels_cox, 
+              aes(label = stat_label), 
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1,
+              color = "black", size = 5, fontface = "bold",
+              inherit.aes = FALSE) +
+    labs(
+      title = "Cumulative Incidence Curves by Protein Score Tertiles",
+      x = "Time (years)",
+      y = "Cumulative Incidence"
+    ) +
+    theme_pubr() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      strip.text = element_text(size = 12, face = "bold"),
+      strip.background = element_rect(fill = "white", color = "black"),
+      axis.text = element_text(size = 10),
+      axis.title = element_text(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),  # 去除细网格线
+      panel.grid.major = element_blank()   # 去除主网格线
+    )
+  
+  print(p_cumulative_final)
+  
+  ggsave("cumulative_incidence_final.pdf", p_cumulative_final, 
+         width = 20, height = 6, dpi = 300)
+  
+  cat("✓ 最终版累积发生率图已保存\n")
+}
+
+# 6. 生成最终版分面生存概率图（85%-100%范围，无网格线）
+if(nrow(all_transitions_data) > 0) {
+  cat("\n生成最终版分面生存概率图...\n")
+  
+  # 准备统计标签（Log-rank P值）
+  stat_labels_logrank <- cox_results_3group %>%
+    mutate(
+      stat_label = ifelse(!is.na(Log_Rank_P), 
+                          paste0("P = ", format.pval(Log_Rank_P, digits = 3)),
+                          ""),
+      transition = factor(Transition, levels = transition_names)
+    ) %>%
+    select(transition, stat_label)
+  
+  # 生存概率分面图（y轴85%-100%，无网格线）
+  p_survival_final <- ggplot(all_transitions_data, aes(x = time, y = survival, color = group)) +
+    geom_step(size = 1.0) +
+    geom_point(data = all_transitions_data[all_transitions_data$n.event > 0, ], 
+               size = 1.2, alpha = 0.7) +
+    scale_color_manual(values = c("Low Score" = "#2E7D32", 
+                                  "Medium Score" = "#FF9800", 
+                                  "High Score" = "#D32F2F"),
+                       name = "Protein Score") +
+    scale_y_continuous(labels = percent_format(accuracy = 1), 
+                       limits = c(0.85, 1.00),  # y轴范围改为85%-100%
+                       breaks = seq(0.85, 1.00, 0.05)) +  # 设置刻度
+    facet_wrap(~ transition, ncol = 5, scales = "free_x") +
+    # 添加P值标签
+    geom_text(data = stat_labels_logrank, 
+              aes(label = stat_label), 
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1,
+              color = "black", size = 5, fontface = "bold",
+              inherit.aes = FALSE) +
+    labs(
+      title = "Survival Probability Curves by Protein Score Tertiles (85%-100%)",
+      x = "Time (years)",
+      y = "Event-free Probability"
+    ) +
+    theme_pubr() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      strip.text = element_text(size = 12, face = "bold"),
+      strip.background = element_rect(fill = "white", color = "black"),
+      axis.text = element_text(size = 10),
+      axis.title = element_text(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),  # 去除细网格线
+      panel.grid.major = element_blank()   # 去除主网格线
+    )
+  
+  print(p_survival_final)
+  
+  ggsave("survival_probability_final.pdf", p_survival_final, 
+         width = 20, height = 6, dpi = 300)
+  
+  cat("✓ 最终版生存概率图已保存\n")
+}
+
+# 7. 修正版HR森林图
+if(nrow(cox_results_3group) > 0) {
+  cat("\n生成修正版HR森林图...\n")
+  
+  # 手动创建森林图数据
+  forest_data <- data.frame()
+  
+  for(i in 1:nrow(cox_results_3group)) {
+    row_data <- cox_results_3group[i, ]
+    
+    # Medium Score vs Low Score
+    if(!is.na(row_data$HR_Medium)) {
+      forest_data <- rbind(forest_data, data.frame(
+        Transition = row_data$Transition,
+        Group = "Medium vs Low",
+        HR = row_data$HR_Medium,
+        HR_Lower = row_data$HR_Medium_Lower,
+        HR_Upper = row_data$HR_Medium_Upper,
+        P_value = row_data$P_Medium
+      ))
+    }
+    
+    # High Score vs Low Score
+    if(!is.na(row_data$HR_High)) {
+      forest_data <- rbind(forest_data, data.frame(
+        Transition = row_data$Transition,
+        Group = "High vs Low",
+        HR = row_data$HR_High,
+        HR_Lower = row_data$HR_High_Lower,
+        HR_Upper = row_data$HR_High_Upper,
+        P_value = row_data$P_High
+      ))
+    }
+  }
+  
+  if(nrow(forest_data) > 0) {
+    # 设置因子顺序
+    forest_data$Transition <- factor(forest_data$Transition, levels = rev(transition_names))
+    forest_data$Group <- factor(forest_data$Group, levels = c("Medium vs Low", "High vs Low"))
+    
+    # 森林图
+    p_forest <- ggplot(forest_data, aes(x = HR, y = interaction(Transition, Group, sep = " - "), color = Group)) +
+      geom_vline(xintercept = 1, linetype = "dashed", color = "gray50", size = 0.8) +
+      geom_errorbarh(aes(xmin = HR_Lower, xmax = HR_Upper), height = 0.2, size = 1) +
+      geom_point(size = 3) +
+      scale_color_manual(values = c("Medium vs Low" = "#FF9800", "High vs Low" = "#D32F2F")) +
+      scale_x_log10(breaks = c(0.5, 0.7, 1, 1.5, 2, 3), 
+                    labels = c("0.5", "0.7", "1.0", "1.5", "2.0", "3.0")) +
+      labs(
+        title = "Hazard Ratios by Protein Score Tertiles",
+        x = "Hazard Ratio (95% CI)",
+        y = "",
+        color = "Comparison"
+      ) +
+      theme_pubr() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        axis.text.y = element_text(size = 10),
+        legend.position = "bottom",
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90", size = 0.3),
+        panel.grid.major.y = element_blank()
+      )
+    
+    print(p_forest)
+    
+    ggsave("hazard_ratio_forest_plot_fixed.pdf", p_forest, 
+           width = 12, height = 8, dpi = 300)
+    
+    cat("✓ 修正版HR森林图已保存\n")
+  }
+}
+
+# 8. 保存统计结果
+if(nrow(cox_results_3group) > 0) {
+  cat("\n=== Cox回归结果 ===\n")
+  print(cox_results_3group)
+  write.csv(cox_results_3group, "cox_regression_tertiles_final_results.csv", row.names = FALSE)
+  cat("✓ Cox回归结果已保存\n")
+}
+
+# 9. 保存原始数据
+if(nrow(all_transitions_data) > 0) {
+  write.csv(all_transitions_data, "survival_data_all_transitions_final.csv", row.names = FALSE)
+  cat("✓ 生存数据已保存\n")
+}
+
+cat("\n✓ 最终改进版分面三分位KM曲线分析完成！\n")
+cat("输出文件:\n")
+cat("- 最终累积发生率图: cumulative_incidence_final.pdf\n")
+cat("- 最终生存概率图(85-100%): survival_probability_final.pdf\n")
+cat("- 修正HR森林图: hazard_ratio_forest_plot_fixed.pdf\n")
+cat("- Cox回归结果: cox_regression_tertiles_final_results.csv\n")
+cat("- 生存数据: survival_data_all_transitions_final.csv\n")
